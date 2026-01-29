@@ -1,0 +1,24 @@
+{
+  "name": "mood-svg",
+  "version": "1.0.0",
+  "description": "**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**",
+  "author": "0xEthan",
+  "license": "MIT",
+  "main": "index.js",
+  "directories": {
+    "lib": "lib",
+    "test": "test"
+  },
+  "dependencies": {
+    "undici-types": "^7.19.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.1.0",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "build": "forge build",
+    "format": "forge fmt",
+    "test": "export LOCAL_TIMESTAMP=$(date +%s) && forge test -vvv"
+  }
+}
