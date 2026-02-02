@@ -2,7 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {Test, console} from "forge-std/Test.sol";
-import {Mood, Ownable, Base64} from "../src/Mood.sol";
+import {Mood, Ownable, Base64} from "../src/nft/Mood.sol";
 
 contract MoodTest is Test {
     Mood public mood;
