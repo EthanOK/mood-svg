@@ -13,6 +13,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
 
     error DSCEngine__NeedsMoreThanZero();
     error DSCEngine__TokenNotAllowed(address token);
+    error DSCEngine__HealthFactorTooLow(uint256 healthFactor);
 
     event CollateralDeposited(address indexed user, address indexed token, uint256 indexed amount);
 
@@ -24,6 +25,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
     uint256 constant TIME_OUT = 6 hours;
     uint256 private constant LIQUIDATION_THRESHOLD = 80;
     uint256 private constant LIQUIDATION_PRECISION = 100;
+    uint256 private constant HEALTH_FACTOR_PRECISION = 1e18;
 
     DecentralizedStableCoin private immutable i_dsc;
 
@@ -73,7 +75,10 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         address sender = _msgSender();
         _dscMinted[sender] += amountDsc;
 
-        // check health factor
+        uint256 healthFactor = getHealthFactor(sender);
+        if (healthFactor < HEALTH_FACTOR_PRECISION) {
+            revert DSCEngine__HealthFactorTooLow(healthFactor);
+        }
 
         i_dsc.mint(sender, amountDsc);
     }
@@ -82,7 +87,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
 
     function liquidate() external {}
 
-    function getHealthFactor(address user) external view returns (uint256) {
+    function getHealthFactor(address user) public view returns (uint256) {
         (uint256 totalDscMinted, uint256 collateralValueInUsd) = _getAccountInformation(user);
 
         uint256 DSC_DECIMALS = IERC20Metadata(address(i_dsc)).decimals();
@@ -124,7 +129,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         return (price * amount) / (10 ** tokenDecimals);
     }
 
-    function _getCollateralPrice(address token) public view returns (uint256) {
+    function _getCollateralPrice(address token) internal view returns (uint256) {
         AggregatorV3Interface priceFeed = AggregatorV3Interface(_collateralInfo[token].priceFeed);
         (, int256 price,, uint256 updatedAt,) = priceFeed.latestRoundData();
         require(block.timestamp - updatedAt <= TIME_OUT, "Price feed is stale");
@@ -138,7 +143,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
     {
         if (totalDscMinted == 0) return type(uint256).max;
         uint256 collateralAdjustedForThreshold = (collateralValueInUsd * LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECISION;
-        return (collateralAdjustedForThreshold) / totalDscMinted;
+        return ((collateralAdjustedForThreshold) * HEALTH_FACTOR_PRECISION) / totalDscMinted;
     }
 
     modifier moreThanZero(uint256 amount) {
