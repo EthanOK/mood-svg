@@ -16,6 +16,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
     error DSCEngine__HealthFactorTooLow(uint256 healthFactor);
 
     event CollateralDeposited(address indexed from, address indexed dst, address indexed token, uint256 amount);
+    event CollateralRedeemed(address indexed from, address indexed dst, address indexed token, uint256 amount);
 
     struct CollateralInfo {
         address priceFeed;
@@ -90,7 +91,36 @@ contract DSCEngine is Ownable, ReentrancyGuard {
 
     function redeemCollateralForDsc() external {}
 
-    function redeemCollateral() external {}
+    function redeemCollateral(address collateral, uint256 amount)
+        external
+        isAllowedToken(collateral)
+        moreThanZero(amount)
+        nonReentrant
+    {
+        address sender = _msgSender();
+        _redeemCollateral(sender, sender, collateral, amount);
+    }
+
+    function redeemCollateralTo(address dst, address collateral, uint256 amount)
+        external
+        isAllowedToken(collateral)
+        moreThanZero(amount)
+        nonReentrant
+    {
+        address sender = _msgSender();
+        _redeemCollateral(sender, dst, collateral, amount);
+    }
+
+    function _redeemCollateral(address from, address dst, address collateral, uint256 amount) internal {
+        require(dst != address(0), "Invalid destination address");
+        
+        _collateralDeposited[from][collateral] -= amount;
+        IERC20(collateral).safeTransfer(dst, amount);
+
+        _checkHealthFactor(from);
+
+        emit CollateralRedeemed(from, dst, collateral, amount);
+    }
 
     function mintDsc(uint256 amountDsc) external moreThanZero(amountDsc) nonReentrant {
         address sender = _msgSender();
@@ -100,10 +130,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
     function _mintDsc(address from, address to, uint256 amountDsc) internal {
         _dscMinted[from] += amountDsc;
 
-        uint256 healthFactor = getHealthFactor(from);
-        if (healthFactor < HEALTH_FACTOR_PRECISION) {
-            revert DSCEngine__HealthFactorTooLow(healthFactor);
-        }
+        _checkHealthFactor(from);
 
         i_dsc.mint(to, amountDsc);
     }
@@ -169,6 +196,13 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         if (totalDscMinted == 0) return type(uint256).max;
         uint256 collateralAdjustedForThreshold = (collateralValueInUsd * LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECISION;
         return ((collateralAdjustedForThreshold) * HEALTH_FACTOR_PRECISION) / totalDscMinted;
+    }
+
+    function _checkHealthFactor(address user) internal {
+        uint256 healthFactor = getHealthFactor(user);
+        if (healthFactor < HEALTH_FACTOR_PRECISION) {
+            revert DSCEngine__HealthFactorTooLow(healthFactor);
+        }
     }
 
     modifier moreThanZero(uint256 amount) {

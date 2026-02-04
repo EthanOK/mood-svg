@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.13;
 
-import {Test, console} from "forge-std/Test.sol";
+import {Test, console, stdError} from "forge-std/Test.sol";
 import {DSCEngine} from "../src/defi/stablecoin/DSCEngine.sol";
 import {DecentralizedStableCoin} from "../src/defi/stablecoin/DecentralizedStableCoin.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
@@ -9,6 +9,7 @@ import {MockV3Aggregator} from "./mocks/MockV3Aggregator.sol";
 
 contract DSCEngineTest is Test {
     event CollateralDeposited(address indexed from, address indexed dst, address indexed token, uint256 amount);
+    event CollateralRedeemed(address indexed from, address indexed dst, address indexed token, uint256 amount);
 
     DSCEngine public engine;
     DecentralizedStableCoin public dsc;
@@ -268,6 +269,110 @@ contract DSCEngineTest is Test {
         assertEq(hf, 1e18);
     }
 
+    /* ---------- redeemCollateral / redeemCollateralTo ---------- */
+    function test_RedeemCollateral_DecreasesCollateralAndTransfersToken() public {
+        uint256 depositAmount = 1 ether;
+        uint256 redeemAmount = 0.4 ether;
+
+        vm.startPrank(alice);
+        wEth.approve(address(engine), depositAmount);
+        engine.depositCollateral(address(wEth), depositAmount);
+
+        uint256 aliceBalanceBefore = wEth.balanceOf(alice);
+        engine.redeemCollateral(address(wEth), redeemAmount);
+        vm.stopPrank();
+
+        (uint256 totalDscMinted, uint256 collateralValueInUsd) = engine.getAccountInformation(alice);
+        assertEq(totalDscMinted, 0);
+        assertEq(collateralValueInUsd, 1200e8); // 0.6 ETH * $2000
+
+        assertEq(wEth.balanceOf(alice), aliceBalanceBefore + redeemAmount);
+        assertEq(wEth.balanceOf(address(engine)), depositAmount - redeemAmount);
+    }
+
+    function test_RedeemCollateral_EmitsCollateralRedeemed() public {
+        uint256 depositAmount = 1 ether;
+        uint256 redeemAmount = 0.25 ether;
+
+        vm.startPrank(alice);
+        wEth.approve(address(engine), depositAmount);
+        engine.depositCollateral(address(wEth), depositAmount);
+
+        vm.expectEmit(true, true, true, true);
+        emit CollateralRedeemed(alice, alice, address(wEth), redeemAmount);
+        engine.redeemCollateral(address(wEth), redeemAmount);
+        vm.stopPrank();
+    }
+
+    function test_RedeemCollateral_RevertWhen_AmountZero() public {
+        vm.prank(alice);
+        vm.expectRevert(DSCEngine.DSCEngine__NeedsMoreThanZero.selector);
+        engine.redeemCollateral(address(wEth), 0);
+    }
+
+    function test_RedeemCollateral_RevertWhen_TokenNotAllowed() public {
+        ERC20Mock randomToken = new ERC20Mock();
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(DSCEngine.DSCEngine__TokenNotAllowed.selector, address(randomToken)));
+        engine.redeemCollateral(address(randomToken), 1 ether);
+    }
+
+    function test_RedeemCollateral_RevertWhen_RedeemMoreThanDeposited() public {
+        vm.startPrank(alice);
+        wEth.approve(address(engine), 1 ether);
+        engine.depositCollateral(address(wEth), 1 ether);
+
+        vm.expectRevert(stdError.arithmeticError);
+        engine.redeemCollateral(address(wEth), 2 ether);
+        vm.stopPrank();
+    }
+
+    function test_RedeemCollateral_RevertWhen_HealthFactorTooLow_AfterRedeem() public {
+        // Deposit 1 ETH ($2000), mint 1000e8 DSC, then try to redeem 0.5 ETH.
+        // Remaining collateral = 1000e8 USD, adjusted = 800e8 => healthFactor = 0.8e18 < 1e18
+        uint256 depositAmount = 1 ether;
+        uint256 mintAmount = 1000e8;
+        uint256 redeemAmount = 0.5 ether;
+        uint256 expectedHealthFactor = 0.8e18;
+
+        vm.startPrank(alice);
+        wEth.approve(address(engine), depositAmount);
+        engine.depositCollateral(address(wEth), depositAmount);
+        engine.mintDsc(mintAmount);
+
+        vm.expectRevert(abi.encodeWithSelector(DSCEngine.DSCEngine__HealthFactorTooLow.selector, expectedHealthFactor));
+        engine.redeemCollateral(address(wEth), redeemAmount);
+        vm.stopPrank();
+    }
+
+    function test_RedeemCollateralTo_TransfersToDstAndUpdatesFrom() public {
+        uint256 depositAmount = 1 ether;
+        uint256 redeemAmount = 0.1 ether;
+
+        vm.startPrank(alice);
+        wEth.approve(address(engine), depositAmount);
+        engine.depositCollateral(address(wEth), depositAmount);
+
+        uint256 bobBalanceBefore = wEth.balanceOf(bob);
+        engine.redeemCollateralTo(bob, address(wEth), redeemAmount);
+        vm.stopPrank();
+
+        (, uint256 collateralValueInUsd) = engine.getAccountInformation(alice);
+        assertEq(collateralValueInUsd, 1800e8); // 0.9 ETH * $2000
+        assertEq(wEth.balanceOf(bob), bobBalanceBefore + redeemAmount);
+    }
+
+    function test_RedeemCollateralTo_RevertWhen_DstZeroAddress() public {
+        uint256 depositAmount = 1 ether;
+        vm.startPrank(alice);
+        wEth.approve(address(engine), depositAmount);
+        engine.depositCollateral(address(wEth), depositAmount);
+
+        vm.expectRevert(bytes("Invalid destination address"));
+        engine.redeemCollateralTo(address(0), address(wEth), 0.1 ether);
+        vm.stopPrank();
+    }
+
     /* ---------- getCollateralValueInUsd (stale check) ---------- */
     function test_GetCollateralValueInUsd_ReturnsPriceFromFeed() public view {
         uint256 price = engine.getCollateralValueInUsd(address(wEth), 1 ether);
@@ -281,3 +386,5 @@ contract DSCEngineTest is Test {
         engine.getCollateralValueInUsd(address(wEth), 1 ether);
     }
 }
+
+// forge test --match-contract DSCEngineTest -vvv
