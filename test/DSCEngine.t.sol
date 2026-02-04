@@ -476,6 +476,174 @@ contract DSCEngineTest is Test {
         vm.expectRevert("Price feed is stale");
         engine.getCollateralValueInUsd(address(wEth), 1 ether);
     }
+
+    /* ---------- liquidate ---------- */
+    /// @dev Alice: 10 ETH, 12100e8 DSC at $2000; price drops to $1500 => HF < 1. Liquidate 100e8 => HF improves.
+    function test_Liquidate_TransfersCollateralToLiquidatorAndBurnsDsc() public {
+        vm.prank(owner);
+        wEth.mint(alice, 9 ether);
+        vm.prank(owner);
+        wEth.mint(bob, 10 ether);
+
+        vm.startPrank(alice);
+        wEth.approve(address(engine), 10 ether);
+        engine.depositCollateral(address(wEth), 10 ether);
+        engine.mintDsc(12100e8);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        wEth.approve(address(engine), 1 ether);
+        engine.depositCollateral(address(wEth), 1 ether);
+        engine.mintDsc(500e8);
+        vm.stopPrank();
+
+        ethUsdPriceFeed.updateAnswer(int256(1500e8)); // $1500 => alice value 15000e8, adjusted 12000e8, HF = 12000/12100 < 1
+
+        uint256 bobWethBefore = wEth.balanceOf(bob);
+        uint256 debtToCover = 100e8;
+
+        vm.prank(bob);
+        dsc.approve(address(engine), debtToCover);
+        vm.prank(bob);
+        engine.liquidate(alice, address(wEth), debtToCover);
+
+        assertEq(dsc.balanceOf(bob), 500e8 - debtToCover);
+        assertGt(wEth.balanceOf(bob), bobWethBefore);
+
+        (uint256 aliceDebt,) = engine.getAccountInformation(alice);
+        assertEq(aliceDebt, 12100e8 - debtToCover);
+
+        uint256 startHF = uint256(12000) * 1e18 / 12100; // HF before liquidation
+        uint256 endHF = engine.getHealthFactor(alice);
+        assertGt(endHF, startHF);
+    }
+
+    function test_Liquidate_RevertWhen_HealthFactorTooHigh() public {
+        vm.startPrank(alice);
+        wEth.approve(address(engine), 1 ether);
+        engine.depositCollateral(address(wEth), 1 ether);
+        engine.mintDsc(1000e8);
+        vm.stopPrank();
+
+        vm.prank(bob);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DSCEngine.DSCEngine__LiquidationHealthFactorTooHigh.selector, engine.getHealthFactor(alice)
+            )
+        );
+        engine.liquidate(alice, address(wEth), 500e8);
+    }
+
+    /// @dev Liquidate so much that HF gets worse => HealthFactorNotImproved
+    function test_Liquidate_RevertWhen_HealthFactorNotImproved() public {
+        vm.prank(owner);
+        wEth.mint(bob, 10 ether);
+
+        vm.startPrank(alice);
+        wEth.approve(address(engine), 1 ether);
+        engine.depositCollateral(address(wEth), 1 ether);
+        engine.mintDsc(1000e8);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        wEth.approve(address(engine), 1 ether);
+        engine.depositCollateral(address(wEth), 1 ether);
+        engine.mintDsc(600e8);
+        vm.stopPrank();
+
+        ethUsdPriceFeed.updateAnswer(int256(1000e8)); // $1000 => alice collateral 1000e8, adjusted 800e8, HF = 0.8e18
+
+        vm.prank(bob);
+        dsc.approve(address(engine), 500e8);
+        vm.prank(bob);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DSCEngine.DSCEngine__HealthFactorNotImproved.selector, 0.8e18, (360e8 * 1e18) / 500e8
+            )
+        );
+        engine.liquidate(alice, address(wEth), 500e8);
+    }
+
+    function test_Liquidate_RevertWhen_TokenNotAllowed() public {
+        ERC20Mock randomToken = new ERC20Mock();
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(DSCEngine.DSCEngine__TokenNotAllowed.selector, address(randomToken)));
+        engine.liquidate(alice, address(randomToken), 100e8);
+    }
+
+    /// @dev User has collateral but no debt => HF = max => LiquidationHealthFactorTooHigh
+    function test_Liquidate_RevertWhen_UserHasNoDebt() public {
+        vm.startPrank(alice);
+        wEth.approve(address(engine), 1 ether);
+        engine.depositCollateral(address(wEth), 1 ether);
+        vm.stopPrank();
+
+        vm.prank(bob);
+        vm.expectRevert(
+            abi.encodeWithSelector(DSCEngine.DSCEngine__LiquidationHealthFactorTooHigh.selector, type(uint256).max)
+        );
+        engine.liquidate(alice, address(wEth), type(uint256).max);
+    }
+
+    /// @dev debtToCover == max: cover debt for this collateral, take collateral (capped); scenario where HF improves to max (debt fully covered).
+    function test_Liquidate_DebtToCoverMax_LiquidatesAllThisCollateral() public {
+        vm.prank(owner);
+        wEth.mint(alice, 1 ether);
+        vm.prank(owner);
+        wEth.mint(bob, 10 ether);
+
+        vm.startPrank(alice);
+        wEth.approve(address(engine), 2 ether);
+        engine.depositCollateral(address(wEth), 2 ether);
+        engine.mintDsc(1700e8); // at $2000: 4000e8 * 0.8 = 3200e8 cap, ok
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        wEth.approve(address(engine), 2 ether);
+        engine.depositCollateral(address(wEth), 2 ether);
+        engine.mintDsc(2000e8); // at $2000
+        dsc.approve(address(engine), type(uint256).max);
+        vm.stopPrank();
+
+        ethUsdPriceFeed.updateAnswer(int256(1000e8)); // $1000 => alice value 2000e8, adjusted 1600e8, HF = 1600/1700 < 1
+
+        uint256 bobWethBefore = wEth.balanceOf(bob);
+
+        vm.prank(bob);
+        engine.liquidate(alice, address(wEth), type(uint256).max);
+
+        assertGt(wEth.balanceOf(bob), bobWethBefore);
+        (uint256 aliceDebt, uint256 aliceCollateralValue) = engine.getAccountInformation(alice);
+        assertEq(aliceDebt, 0);
+        assertLt(aliceCollateralValue, 2000e8);
+    }
+
+    /// @dev debtToCover > user debt is capped to user debt, liquidation succeeds
+    function test_Liquidate_CapsDebtToCoverToUserDebt() public {
+        vm.prank(owner);
+        wEth.mint(bob, 10 ether);
+
+        vm.startPrank(alice);
+        wEth.approve(address(engine), 1 ether);
+        engine.depositCollateral(address(wEth), 1 ether);
+        engine.mintDsc(1600e8); // at $2000: max 1600e8
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        wEth.approve(address(engine), 2 ether);
+        engine.depositCollateral(address(wEth), 2 ether);
+        engine.mintDsc(2000e8); // at $2000: 2 ETH => max 3200e8
+        dsc.approve(address(engine), 2000e8);
+        vm.stopPrank();
+
+        ethUsdPriceFeed.updateAnswer(int256(1000e8)); // $1000 => alice HF = 800/1600 = 0.5
+
+        vm.prank(bob);
+        engine.liquidate(alice, address(wEth), 2000e8); // more than alice's 1600e8, cap to 1600e8
+
+        (uint256 aliceDebt,) = engine.getAccountInformation(alice);
+        assertEq(aliceDebt, 0);
+    }
 }
 
 // forge test --match-contract DSCEngineTest -vvv

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {DecentralizedStableCoin} from "./DecentralizedStableCoin.sol";
@@ -14,6 +15,8 @@ contract DSCEngine is Ownable, ReentrancyGuard {
     error DSCEngine__NeedsMoreThanZero();
     error DSCEngine__TokenNotAllowed(address token);
     error DSCEngine__HealthFactorTooLow(uint256 healthFactor);
+    error DSCEngine__LiquidationHealthFactorTooHigh(uint256 healthFactor);
+    error DSCEngine__HealthFactorNotImproved(uint256 startHealthFactor, uint256 endHealthFactor);
 
     event CollateralDeposited(address indexed from, address indexed dst, address indexed token, uint256 amount);
     event CollateralRedeemed(address indexed from, address indexed dst, address indexed token, uint256 amount);
@@ -24,6 +27,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
     }
 
     uint256 constant TIME_OUT = 6 hours;
+    uint256 constant LIQUIDATION_BONUS = 10; // 10%
     uint256 private constant LIQUIDATION_THRESHOLD = 80;
     uint256 private constant LIQUIDATION_PRECISION = 100;
     uint256 private constant HEALTH_FACTOR_PRECISION = 1e18;
@@ -62,6 +66,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         address sender = _msgSender();
         _depositCollateral(sender, sender, collateral, collateralAmount);
         _mintDsc(sender, sender, mintDscAmount);
+        _checkHealthFactor(sender);
     }
 
     function depositCollateral(address collateral, uint256 amount)
@@ -100,6 +105,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         address sender = _msgSender();
         _burnDsc(sender, sender, amountDscToBurn);
         _redeemCollateral(sender, sender, collateral, amountCollateral);
+        _checkHealthFactor(sender);
     }
 
     function redeemCollateral(address collateral, uint256 amount)
@@ -110,6 +116,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
     {
         address sender = _msgSender();
         _redeemCollateral(sender, sender, collateral, amount);
+        _checkHealthFactor(sender);
     }
 
     function redeemCollateralTo(address dst, address collateral, uint256 amount)
@@ -120,6 +127,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
     {
         address sender = _msgSender();
         _redeemCollateral(sender, dst, collateral, amount);
+        _checkHealthFactor(sender);
     }
 
     function _redeemCollateral(address from, address dst, address collateral, uint256 amount) internal {
@@ -128,20 +136,17 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         _collateralDeposited[from][collateral] -= amount;
         IERC20(collateral).safeTransfer(dst, amount);
 
-        _checkHealthFactor(from);
-
         emit CollateralRedeemed(from, dst, collateral, amount);
     }
 
     function mintDsc(uint256 amountDsc) external moreThanZero(amountDsc) nonReentrant {
         address sender = _msgSender();
         _mintDsc(sender, sender, amountDsc);
+        _checkHealthFactor(sender);
     }
 
     function _mintDsc(address from, address to, uint256 amountDsc) internal {
         _dscMinted[from] += amountDsc;
-
-        _checkHealthFactor(from);
 
         i_dsc.mint(to, amountDsc);
     }
@@ -149,6 +154,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
     function burnDsc(uint256 amountDsc) external moreThanZero(amountDsc) nonReentrant {
         address sender = _msgSender();
         _burnDsc(sender, sender, amountDsc);
+        _checkHealthFactor(sender);
     }
 
     function _burnDsc(address from, address to, uint256 amountDsc) internal {
@@ -156,11 +162,60 @@ contract DSCEngine is Ownable, ReentrancyGuard {
 
         IERC20(address(i_dsc)).safeTransferFrom(from, address(this), amountDsc);
 
-        _checkHealthFactor(to);
         i_dsc.burn(amountDsc);
     }
 
-    function liquidate() external {}
+    function liquidate(
+        address user,
+        address collateral,
+        uint256 debtToCover // dscAmount
+    )
+        external
+        isAllowedToken(collateral)
+        nonReentrant
+    {
+        address liquidator = _msgSender();
+        uint256 userCollateralBalance = _collateralDeposited[user][collateral];
+        uint256 userDebt = _dscMinted[user];
+
+        if (debtToCover == type(uint256).max) {
+            if (userCollateralBalance == 0) {
+                revert DSCEngine__NeedsMoreThanZero();
+            }
+            // Debt for this collateral = DSC value of (all this collateral minus bonus)
+            uint256 collateralBase =
+                (userCollateralBalance * LIQUIDATION_PRECISION) / (LIQUIDATION_PRECISION + LIQUIDATION_BONUS);
+            debtToCover = getDscAmountFromCollateral(collateral, collateralBase);
+        }
+
+        // Cap to actual debt to avoid underflow in _burnDsc
+        if (debtToCover > userDebt) {
+            debtToCover = userDebt;
+        }
+
+        uint256 startHealthFactor = getHealthFactor(user);
+        if (startHealthFactor >= HEALTH_FACTOR_PRECISION) {
+            revert DSCEngine__LiquidationHealthFactorTooHigh(startHealthFactor);
+        }
+
+        uint256 collateralAmountFromDebtCover = getCollateralAmountFromDsc(collateral, debtToCover);
+
+        uint256 bonusCollateralAmount = (collateralAmountFromDebtCover * LIQUIDATION_BONUS) / LIQUIDATION_PRECISION;
+
+        uint256 totalCollateralToRedeem = collateralAmountFromDebtCover + bonusCollateralAmount;
+
+        if (totalCollateralToRedeem > userCollateralBalance) {
+            totalCollateralToRedeem = userCollateralBalance;
+        }
+
+        _redeemCollateral(user, liquidator, collateral, totalCollateralToRedeem);
+        _burnDsc(liquidator, user, debtToCover);
+
+        uint256 endHealthFactor = getHealthFactor(user);
+        if (endHealthFactor <= startHealthFactor) {
+            revert DSCEngine__HealthFactorNotImproved(startHealthFactor, endHealthFactor);
+        }
+    }
 
     function getHealthFactor(address user) public view returns (uint256) {
         (uint256 totalDscMinted, uint256 collateralValueInUsd) = _getAccountInformation(user);
@@ -219,6 +274,26 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         if (totalDscMinted == 0) return type(uint256).max;
         uint256 collateralAdjustedForThreshold = (collateralValueInUsd * LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECISION;
         return ((collateralAdjustedForThreshold) * HEALTH_FACTOR_PRECISION) / totalDscMinted;
+    }
+
+    function getCollateralAmountFromDsc(address collateral, uint256 dscAmount) internal view returns (uint256) {
+        uint256 price = _getCollateralPrice(collateral);
+
+        uint8 dscDecimals = IERC20Metadata(address(i_dsc)).decimals();
+        uint8 collateralDecimals = IERC20Metadata(collateral).decimals();
+        uint8 feedDecimals = IERC20Metadata(_collateralInfo[collateral].priceFeed).decimals();
+        uint256 collateralAmount =
+            Math.mulDiv(dscAmount, (10 ** (collateralDecimals + feedDecimals)), (price * (10 ** dscDecimals)));
+        return collateralAmount;
+    }
+
+    /// @return dscAmount DSC amount with the same USD value as the given collateral amount
+    function getDscAmountFromCollateral(address collateral, uint256 collateralAmount) internal view returns (uint256) {
+        uint256 price = _getCollateralPrice(collateral);
+        uint8 dscDecimals = IERC20Metadata(address(i_dsc)).decimals();
+        uint8 collateralDecimals = IERC20Metadata(collateral).decimals();
+        uint8 feedDecimals = IERC20Metadata(_collateralInfo[collateral].priceFeed).decimals();
+        return Math.mulDiv(collateralAmount, (price * (10 ** dscDecimals)), (10 ** (collateralDecimals + feedDecimals)));
     }
 
     function _checkHealthFactor(address user) internal view {
