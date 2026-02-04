@@ -373,6 +373,97 @@ contract DSCEngineTest is Test {
         vm.stopPrank();
     }
 
+    /* ---------- redeemCollateralForDsc ---------- */
+    function test_RedeemCollateralForDsc_BurnsDscAndRedeemsCollateral() public {
+        uint256 depositAmount = 1 ether;
+        uint256 mintAmount = 500e8;
+        uint256 burnAmount = 200e8;
+        uint256 redeemAmount = 0.2 ether;
+
+        vm.startPrank(alice);
+        wEth.approve(address(engine), depositAmount);
+        engine.depositCollateral(address(wEth), depositAmount);
+        engine.mintDsc(mintAmount);
+
+        // burnDsc path pulls DSC via transferFrom
+        dsc.approve(address(engine), burnAmount);
+
+        uint256 aliceWethBefore = wEth.balanceOf(alice);
+        engine.redeemCollateralForDsc(address(wEth), redeemAmount, burnAmount);
+        vm.stopPrank();
+
+        // DSC minted should decrease, DSC balance should decrease by burnAmount
+        (uint256 totalDscMinted, uint256 collateralValueInUsd) = engine.getAccountInformation(alice);
+        assertEq(totalDscMinted, mintAmount - burnAmount);
+        assertEq(dsc.balanceOf(alice), mintAmount - burnAmount);
+
+        // Collateral should decrease and tokens should be returned
+        assertEq(collateralValueInUsd, 1600e8); // 0.8 ETH * $2000
+        assertEq(wEth.balanceOf(alice), aliceWethBefore + redeemAmount);
+        assertEq(wEth.balanceOf(address(engine)), depositAmount - redeemAmount);
+    }
+
+    function test_RedeemCollateralForDsc_EmitsCollateralRedeemed() public {
+        uint256 depositAmount = 1 ether;
+        uint256 mintAmount = 500e8;
+        uint256 burnAmount = 100e8;
+        uint256 redeemAmount = 0.1 ether;
+
+        vm.startPrank(alice);
+        wEth.approve(address(engine), depositAmount);
+        engine.depositCollateral(address(wEth), depositAmount);
+        engine.mintDsc(mintAmount);
+        dsc.approve(address(engine), burnAmount);
+
+        vm.expectEmit(true, true, true, true);
+        emit CollateralRedeemed(alice, alice, address(wEth), redeemAmount);
+        engine.redeemCollateralForDsc(address(wEth), redeemAmount, burnAmount);
+        vm.stopPrank();
+    }
+
+    function test_RedeemCollateralForDsc_RevertWhen_CollateralAmountZero() public {
+        vm.prank(alice);
+        vm.expectRevert(DSCEngine.DSCEngine__NeedsMoreThanZero.selector);
+        engine.redeemCollateralForDsc(address(wEth), 0, 1e8);
+    }
+
+    function test_RedeemCollateralForDsc_RevertWhen_BurnAmountZero() public {
+        vm.prank(alice);
+        vm.expectRevert(DSCEngine.DSCEngine__NeedsMoreThanZero.selector);
+        engine.redeemCollateralForDsc(address(wEth), 1, 0);
+    }
+
+    function test_RedeemCollateralForDsc_RevertWhen_TokenNotAllowed() public {
+        ERC20Mock randomToken = new ERC20Mock();
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(DSCEngine.DSCEngine__TokenNotAllowed.selector, address(randomToken)));
+        engine.redeemCollateralForDsc(address(randomToken), 1 ether, 1e8);
+    }
+
+    function test_RedeemCollateralForDsc_RevertWhen_HealthFactorTooLow_AfterRedeem() public {
+        // Deposit 1 ETH ($2000), mint 1500e8 DSC, burn 1e8, then redeem 0.3 ETH.
+        // Remaining collateral = 0.7 ETH => 1400e8 USD; adjusted = 1120e8
+        // Remaining debt = 1499e8, so healthFactor = 1120/1499 * 1e18 < 1e18 => revert
+        uint256 depositAmount = 1 ether;
+        uint256 mintAmount = 1500e8;
+        uint256 burnAmount = 1e8;
+        uint256 redeemAmount = 0.3 ether;
+
+        uint256 collateralAdjusted = (1400e8 * 80) / 100; // 1120e8
+        uint256 remainingDebt = mintAmount - burnAmount; // 1499e8
+        uint256 expectedHealthFactor = (collateralAdjusted * 1e18) / remainingDebt;
+
+        vm.startPrank(alice);
+        wEth.approve(address(engine), depositAmount);
+        engine.depositCollateral(address(wEth), depositAmount);
+        engine.mintDsc(mintAmount);
+        dsc.approve(address(engine), burnAmount);
+
+        vm.expectRevert(abi.encodeWithSelector(DSCEngine.DSCEngine__HealthFactorTooLow.selector, expectedHealthFactor));
+        engine.redeemCollateralForDsc(address(wEth), redeemAmount, burnAmount);
+        vm.stopPrank();
+    }
+
     /* ---------- getCollateralValueInUsd (stale check) ---------- */
     function test_GetCollateralValueInUsd_ReturnsPriceFromFeed() public view {
         uint256 price = engine.getCollateralValueInUsd(address(wEth), 1 ether);

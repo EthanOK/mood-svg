@@ -89,7 +89,18 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         emit CollateralDeposited(from, dst, collateral, amount);
     }
 
-    function redeemCollateralForDsc() external {}
+    //
+    function redeemCollateralForDsc(address collateral, uint256 amountCollateral, uint256 amountDscToBurn)
+        external
+        isAllowedToken(collateral)
+        moreThanZero(amountCollateral)
+        moreThanZero(amountDscToBurn)
+        nonReentrant
+    {
+        address sender = _msgSender();
+        _burnDsc(sender, sender, amountDscToBurn);
+        _redeemCollateral(sender, sender, collateral, amountCollateral);
+    }
 
     function redeemCollateral(address collateral, uint256 amount)
         external
@@ -113,7 +124,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
 
     function _redeemCollateral(address from, address dst, address collateral, uint256 amount) internal {
         require(dst != address(0), "Invalid destination address");
-        
+
         _collateralDeposited[from][collateral] -= amount;
         IERC20(collateral).safeTransfer(dst, amount);
 
@@ -135,7 +146,19 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         i_dsc.mint(to, amountDsc);
     }
 
-    function burnDsc() external {}
+    function burnDsc(uint256 amountDsc) external moreThanZero(amountDsc) nonReentrant {
+        address sender = _msgSender();
+        _burnDsc(sender, sender, amountDsc);
+    }
+
+    function _burnDsc(address from, address to, uint256 amountDsc) internal {
+        _dscMinted[to] -= amountDsc;
+
+        IERC20(address(i_dsc)).safeTransferFrom(from, address(this), amountDsc);
+
+        _checkHealthFactor(to);
+        i_dsc.burn(amountDsc);
+    }
 
     function liquidate() external {}
 
@@ -198,7 +221,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         return ((collateralAdjustedForThreshold) * HEALTH_FACTOR_PRECISION) / totalDscMinted;
     }
 
-    function _checkHealthFactor(address user) internal {
+    function _checkHealthFactor(address user) internal view {
         uint256 healthFactor = getHealthFactor(user);
         if (healthFactor < HEALTH_FACTOR_PRECISION) {
             revert DSCEngine__HealthFactorTooLow(healthFactor);
