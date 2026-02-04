@@ -8,6 +8,8 @@ import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MockV3Aggregator} from "./mocks/MockV3Aggregator.sol";
 
 contract DSCEngineTest is Test {
+    event CollateralDeposited(address indexed from, address indexed dst, address indexed token, uint256 amount);
+
     DSCEngine public engine;
     DecentralizedStableCoin public dsc;
     ERC20Mock public wEth;
@@ -17,24 +19,24 @@ contract DSCEngineTest is Test {
     address public alice = makeAddr("alice");
     address public bob = makeAddr("bob");
 
-    uint256 constant ETH_INITIAL_PRICE = 2000e8; // $2000, 8 decimals
+    uint8 constant PRICE_FEED_DECIMALS = 8;
+    uint256 constant ETH_INITIAL_PRICE = 2000 * 10 ** PRICE_FEED_DECIMALS; // $2000
     uint256 constant INITIAL_MINT_AMOUNT = 100 ether;
 
     function setUp() public {
-        // 部署 wEth 代币
+        // Deploy wEth token
         vm.prank(owner);
         wEth = new ERC20Mock();
         wEth.mint(alice, INITIAL_MINT_AMOUNT);
 
-        // 部署 ETH/USD 价格预言机 ($2000)
-        ethUsdPriceFeed = new MockV3Aggregator(int256(ETH_INITIAL_PRICE));
-        ethUsdPriceFeed.setUpdatedAt(block.timestamp);
+        // Deploy ETH/USD price feed ($2000)
+        ethUsdPriceFeed = new MockV3Aggregator(PRICE_FEED_DECIMALS, int256(ETH_INITIAL_PRICE));
 
-        // 部署 DSC
+        // Deploy DSC
         vm.prank(owner);
         dsc = new DecentralizedStableCoin(owner);
 
-        // 部署 DSCEngine
+        // Deploy DSCEngine
         address[] memory tokenAddresses = new address[](1);
         tokenAddresses[0] = address(wEth);
         address[] memory priceFeedAddresses = new address[](1);
@@ -43,7 +45,7 @@ contract DSCEngineTest is Test {
         vm.prank(owner);
         engine = new DSCEngine(tokenAddresses, priceFeedAddresses, address(dsc));
 
-        // 将 DSC 的 owner 转移给 engine，以便 engine 可以 mint
+        // Transfer DSC ownership to engine so it can mint
         vm.prank(owner);
         dsc.transferOwnership(address(engine));
     }
@@ -98,6 +100,82 @@ contract DSCEngineTest is Test {
         assertEq(collateralValueInUsd, 4000e8); // 2 ETH * $2000
     }
 
+    /* ---------- depositCollateralAndMintDsc ---------- */
+    function test_DepositCollateralAndMintDsc_UpdatesCollateralAndMintsDsc() public {
+        uint256 collateralAmount = 1 ether;
+        uint256 mintDscAmount = 1000e8;
+        vm.startPrank(alice);
+        wEth.approve(address(engine), collateralAmount);
+        engine.depositCollateralAndMintDsc(address(wEth), collateralAmount, mintDscAmount);
+        vm.stopPrank();
+
+        (uint256 totalDscMinted, uint256 collateralValueInUsd) = engine.getAccountInformation(alice);
+        assertEq(totalDscMinted, mintDscAmount);
+        assertEq(collateralValueInUsd, 2000e8); // 1 ETH * $2000
+        assertEq(wEth.balanceOf(alice), INITIAL_MINT_AMOUNT - collateralAmount);
+        assertEq(wEth.balanceOf(address(engine)), collateralAmount);
+        assertEq(dsc.balanceOf(alice), mintDscAmount);
+    }
+
+    function test_DepositCollateralAndMintDsc_EmitsCollateralDeposited() public {
+        uint256 collateralAmount = 1 ether;
+        uint256 mintDscAmount = 500e8;
+        vm.startPrank(alice);
+        wEth.approve(address(engine), collateralAmount);
+        vm.expectEmit(true, true, true, true);
+        emit CollateralDeposited(alice, alice, address(wEth), collateralAmount);
+        engine.depositCollateralAndMintDsc(address(wEth), collateralAmount, mintDscAmount);
+        vm.stopPrank();
+    }
+
+    function test_DepositCollateralAndMintDsc_RevertWhen_CollateralAmountZero() public {
+        vm.prank(alice);
+        vm.expectRevert(DSCEngine.DSCEngine__NeedsMoreThanZero.selector);
+        engine.depositCollateralAndMintDsc(address(wEth), 0, 100e8);
+    }
+
+    function test_DepositCollateralAndMintDsc_RevertWhen_MintDscAmountZero() public {
+        vm.startPrank(alice);
+        wEth.approve(address(engine), 1 ether);
+        vm.expectRevert(DSCEngine.DSCEngine__NeedsMoreThanZero.selector);
+        engine.depositCollateralAndMintDsc(address(wEth), 1 ether, 0);
+        vm.stopPrank();
+    }
+
+    function test_DepositCollateralAndMintDsc_RevertWhen_TokenNotAllowed() public {
+        ERC20Mock randomToken = new ERC20Mock();
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(DSCEngine.DSCEngine__TokenNotAllowed.selector, address(randomToken)));
+        engine.depositCollateralAndMintDsc(address(randomToken), 1 ether, 100e8);
+    }
+
+    function test_DepositCollateralAndMintDsc_RevertWhen_HealthFactorTooLow() public {
+        uint256 collateralAmount = 1 ether;
+        uint256 overMintAmount = 1601e8;
+        uint256 collateralAdjusted = (2000e8 * 80) / 100;
+        uint256 expectedHealthFactor = (collateralAdjusted * 1e18) / overMintAmount;
+
+        vm.startPrank(alice);
+        wEth.approve(address(engine), collateralAmount);
+        vm.expectRevert(abi.encodeWithSelector(DSCEngine.DSCEngine__HealthFactorTooLow.selector, expectedHealthFactor));
+        engine.depositCollateralAndMintDsc(address(wEth), collateralAmount, overMintAmount);
+        vm.stopPrank();
+    }
+
+    function test_DepositCollateralAndMintDsc_SucceedsAtMaxAllowed() public {
+        uint256 collateralAmount = 1 ether;
+        uint256 mintDscAmount = 1600e8;
+
+        vm.startPrank(alice);
+        wEth.approve(address(engine), collateralAmount);
+        engine.depositCollateralAndMintDsc(address(wEth), collateralAmount, mintDscAmount);
+        vm.stopPrank();
+
+        assertEq(dsc.balanceOf(alice), mintDscAmount);
+        uint256 hf = engine.getHealthFactor(alice);
+        assertEq(hf, 1e18);
+    }
+
     /* ---------- getCollateralValueInUsd / getUserCollateralValueInUsd ---------- */
     function test_GetCollateralValueInUsd_ReturnsCorrectValue() public view {
         // 1 ether (18 decimals) * 2000e8 (price 8 decimals) / 1e18 = 2000e8
@@ -127,7 +205,7 @@ contract DSCEngineTest is Test {
         vm.startPrank(alice);
         wEth.approve(address(engine), 1 ether);
         engine.depositCollateral(address(wEth), 1 ether);
-        // 抵押品价值 2000e8 USD，铸造 1000e8 DSC
+        // Collateral value 2000e8 USD, mint 1000e8 DSC
         // collateralAdjusted = 2000e8 * 80 / 100 = 1600e8, healthFactor = 1600e8 * 1e18 / 1000e8 = 1.6e18
         engine.mintDsc(1000e8);
         vm.stopPrank();
@@ -155,20 +233,20 @@ contract DSCEngineTest is Test {
         engine.mintDsc(0);
     }
 
-    /* ---------- 超额借贷 (HealthFactorTooLow) ---------- */
-    /// @dev 无抵押时铸造应 revert
+    /* ---------- Over-borrowing (HealthFactorTooLow) ---------- */
+    /// @dev Minting with no collateral should revert
     function test_MintDsc_RevertWhen_NoCollateral() public {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(DSCEngine.DSCEngine__HealthFactorTooLow.selector, 0));
         engine.mintDsc(100e8);
     }
 
-    /// @dev 1 ETH ($2000)，80% 上限 = 1600e8 DSC；铸造超过 1600e8 应 revert
+    /// @dev 1 ETH ($2000), 80% cap = 1600e8 DSC; minting over 1600e8 should revert
     function test_MintDsc_RevertWhen_HealthFactorTooLow_OverBorrow() public {
         vm.startPrank(alice);
         wEth.approve(address(engine), 1 ether);
         engine.depositCollateral(address(wEth), 1 ether);
-        // 抵押品 2000e8 USD，80% = 1600e8，最多可铸 1600e8 DSC；铸 1601e8 → healthFactor < 1e18
+        // Collateral 2000e8 USD, 80% = 1600e8 max DSC; mint 1601e8 -> healthFactor < 1e18
         uint256 collateralAdjusted = (2000e8 * 80) / 100;
         uint256 overBorrowAmount = 1601e8;
         uint256 expectedHealthFactor = (collateralAdjusted * 1e18) / overBorrowAmount;
@@ -177,7 +255,7 @@ contract DSCEngineTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev 边界：恰好铸到上限 1600e8 应成功
+    /// @dev Boundary: minting exactly at cap 1600e8 should succeed
     function test_MintDsc_SucceedsAtMaxAllowed() public {
         vm.startPrank(alice);
         wEth.approve(address(engine), 1 ether);
@@ -197,7 +275,7 @@ contract DSCEngineTest is Test {
     }
 
     function test_GetCollateralValueInUsd_RevertWhen_Stale() public {
-        // 将区块时间推进超过 TIME_OUT (6 hours)
+        // Warp block time past TIME_OUT (6 hours)
         vm.warp(block.timestamp + 7 hours);
         vm.expectRevert("Price feed is stale");
         engine.getCollateralValueInUsd(address(wEth), 1 ether);

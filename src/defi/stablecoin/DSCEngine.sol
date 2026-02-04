@@ -15,7 +15,7 @@ contract DSCEngine is Ownable, ReentrancyGuard {
     error DSCEngine__TokenNotAllowed(address token);
     error DSCEngine__HealthFactorTooLow(uint256 healthFactor);
 
-    event CollateralDeposited(address indexed user, address indexed token, uint256 indexed amount);
+    event CollateralDeposited(address indexed from, address indexed dst, address indexed token, uint256 amount);
 
     struct CollateralInfo {
         address priceFeed;
@@ -51,7 +51,17 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         i_dsc = DecentralizedStableCoin(dscAddress);
     }
 
-    function depositCollateralAndMintDsc() external {}
+    function depositCollateralAndMintDsc(address collateral, uint256 collateralAmount, uint256 mintDscAmount)
+        external
+        isAllowedToken(collateral)
+        moreThanZero(collateralAmount)
+        moreThanZero(mintDscAmount)
+        nonReentrant
+    {
+        address sender = _msgSender();
+        _depositCollateral(sender, sender, collateral, collateralAmount);
+        _mintDsc(sender, sender, mintDscAmount);
+    }
 
     function depositCollateral(address collateral, uint256 amount)
         external
@@ -59,12 +69,23 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         moreThanZero(amount)
         nonReentrant
     {
-        address sender = _msgSender();
+        _depositCollateral(_msgSender(), _msgSender(), collateral, amount);
+    }
 
-        _collateralDeposited[sender][collateral] += amount;
-        IERC20(collateral).safeTransferFrom(sender, address(this), amount);
+    function depositCollateralTo(address dst, address collateral, uint256 amount)
+        external
+        isAllowedToken(collateral)
+        moreThanZero(amount)
+        nonReentrant
+    {
+        _depositCollateral(_msgSender(), dst, collateral, amount);
+    }
 
-        emit CollateralDeposited(sender, collateral, amount);
+    function _depositCollateral(address from, address dst, address collateral, uint256 amount) internal {
+        require(dst != address(0), "Invalid destination address");
+        _collateralDeposited[dst][collateral] += amount;
+        IERC20(collateral).safeTransferFrom(from, address(this), amount);
+        emit CollateralDeposited(from, dst, collateral, amount);
     }
 
     function redeemCollateralForDsc() external {}
@@ -73,14 +94,18 @@ contract DSCEngine is Ownable, ReentrancyGuard {
 
     function mintDsc(uint256 amountDsc) external moreThanZero(amountDsc) nonReentrant {
         address sender = _msgSender();
-        _dscMinted[sender] += amountDsc;
+        _mintDsc(sender, sender, amountDsc);
+    }
 
-        uint256 healthFactor = getHealthFactor(sender);
+    function _mintDsc(address from, address to, uint256 amountDsc) internal {
+        _dscMinted[from] += amountDsc;
+
+        uint256 healthFactor = getHealthFactor(from);
         if (healthFactor < HEALTH_FACTOR_PRECISION) {
             revert DSCEngine__HealthFactorTooLow(healthFactor);
         }
 
-        i_dsc.mint(sender, amountDsc);
+        i_dsc.mint(to, amountDsc);
     }
 
     function burnDsc() external {}

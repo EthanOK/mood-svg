@@ -1,66 +1,72 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.0;
 
-import {AggregatorV3Interface} from "../../src/chainlink/interfaces/AggregatorV3Interface.sol";
+/**
+ * @title MockV3Aggregator
+ * @notice Based on the FluxAggregator contract
+ * @notice Use this contract when you need to test
+ * other contract's ability to read data from an
+ * aggregator contract, but how the aggregator got
+ * its answer is unimportant
+ */
+contract MockV3Aggregator {
+    uint256 public constant version = 0;
 
-contract MockV3Aggregator is AggregatorV3Interface {
-    int256 private s_price;
-    uint8 private s_decimals = 8;
-    /// @dev 若不为 0，则 latestRoundData 返回此时间作为 updatedAt（用于测试过期价格）
-    uint256 private s_updatedAt;
+    uint8 public decimals;
+    int256 public latestAnswer;
+    uint256 public latestTimestamp;
+    uint256 public latestRound;
 
-    constructor(int256 _initialPrice) {
-        s_price = _initialPrice;
+    mapping(uint256 => int256) public getAnswer;
+    mapping(uint256 => uint256) public getTimestamp;
+    mapping(uint256 => uint256) private getStartedAt;
+
+    constructor(uint8 _decimals, int256 _initialAnswer) {
+        decimals = _decimals;
+        updateAnswer(_initialAnswer);
     }
 
-    function setPrice(int256 _price) external {
-        s_price = _price;
+    function updateAnswer(int256 _answer) public {
+        latestAnswer = _answer;
+        latestTimestamp = block.timestamp;
+        latestRound++;
+        getAnswer[latestRound] = _answer;
+        getTimestamp[latestRound] = block.timestamp;
+        getStartedAt[latestRound] = block.timestamp;
     }
 
-    /// @dev 设置 returned updatedAt，用于模拟过期预言机（如 setUpdatedAt(block.timestamp - 7 hours)）
-    function setUpdatedAt(uint256 _updatedAt) external {
-        s_updatedAt = _updatedAt;
+    function updateRoundData(uint80 _roundId, int256 _answer, uint256 _timestamp, uint256 _startedAt) public {
+        latestRound = _roundId;
+        latestAnswer = _answer;
+        latestTimestamp = _timestamp;
+        getAnswer[latestRound] = _answer;
+        getTimestamp[latestRound] = _timestamp;
+        getStartedAt[latestRound] = _startedAt;
     }
 
-    function decimals() external view override returns (uint8) {
-        return s_decimals;
-    }
-
-    function description() external pure override returns (string memory) {
-        return "Mock V3 Aggregator";
-    }
-
-    function version() external pure override returns (uint256) {
-        return 1;
-    }
-
-    function _getUpdatedAt() private view returns (uint256) {
-        return s_updatedAt != 0 ? s_updatedAt : block.timestamp;
-    }
-
-    function getRoundData(uint80)
+    function getRoundData(uint80 _roundId)
         external
         view
-        override
         returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)
     {
-        roundId = 1;
-        answer = s_price;
-        startedAt = block.timestamp;
-        updatedAt = _getUpdatedAt();
-        answeredInRound = 1;
+        return (_roundId, getAnswer[_roundId], getStartedAt[_roundId], getTimestamp[_roundId], _roundId);
     }
 
     function latestRoundData()
         external
         view
-        override
         returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)
     {
-        roundId = 1;
-        answer = s_price;
-        startedAt = block.timestamp;
-        updatedAt = _getUpdatedAt();
-        answeredInRound = 1;
+        return (
+            uint80(latestRound),
+            getAnswer[latestRound],
+            getStartedAt[latestRound],
+            getTimestamp[latestRound],
+            uint80(latestRound)
+        );
+    }
+
+    function description() external pure returns (string memory) {
+        return "v0.8/tests/MockV3Aggregator.sol";
     }
 }
