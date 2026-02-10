@@ -253,6 +253,10 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         }
     }
 
+    function getCollateralBalanceOfUser(address user, address token) public view returns (uint256) {
+        return _collateralDeposited[user][token];
+    }
+
     function getCollateralValueInUsd(address token, uint256 amount) public view returns (uint256) {
         uint256 price = _getCollateralPrice(token);
         uint256 tokenDecimals = IERC20Metadata(token).decimals();
@@ -294,6 +298,10 @@ contract DSCEngine is Ownable, ReentrancyGuard {
         uint8 collateralDecimals = IERC20Metadata(collateral).decimals();
         uint8 feedDecimals = IERC20Metadata(_collateralInfo[collateral].priceFeed).decimals();
         return Math.mulDiv(collateralAmount, (price * (10 ** dscDecimals)), (10 ** (collateralDecimals + feedDecimals)));
+    }
+
+    function getCollateralTokens() external view returns (address[] memory) {
+        return _collateralTokens;
     }
 
     function _checkHealthFactor(address user) internal view {
