@@ -2,6 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {Test, console, stdError} from "forge-std/Test.sol";
+import {OracleLib} from "../src/libraries/OracleLib.sol";
 import {DSCEngine} from "../src/defi/stablecoin/DSCEngine.sol";
 import {DecentralizedStableCoin} from "../src/defi/stablecoin/DecentralizedStableCoin.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
@@ -473,7 +474,7 @@ contract DSCEngineTest is Test {
     function test_GetCollateralValueInUsd_RevertWhen_Stale() public {
         // Warp block time past TIME_OUT (6 hours)
         vm.warp(block.timestamp + 7 hours);
-        vm.expectRevert("Price feed is stale");
+        vm.expectRevert(OracleLib.OracleLib__StalePrice.selector);
         engine.getCollateralValueInUsd(address(wEth), 1 ether);
     }
 

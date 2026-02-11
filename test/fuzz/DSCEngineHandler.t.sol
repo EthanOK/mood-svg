@@ -2,6 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {Test} from "forge-std/Test.sol";
+import {MockV3Aggregator} from "../mocks/MockV3Aggregator.sol";
 import {DSCEngine} from "../../src/defi/stablecoin/DSCEngine.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {DecentralizedStableCoin} from "../../src/defi/stablecoin/DecentralizedStableCoin.sol";
@@ -13,6 +14,9 @@ contract DSCEngineHandler is Test {
     ERC20Mock public wEth;
     ERC20Mock public wBtc;
 
+    MockV3Aggregator public ethUsdPriceFeed;
+    MockV3Aggregator public btcUsdPriceFeed;
+
     uint256 public timesMintIsCalled;
     address[] usersWithCollateralDeposited;
 
@@ -22,6 +26,8 @@ contract DSCEngineHandler is Test {
         address[] memory collateralTokens = engine.getCollateralTokens();
         wEth = ERC20Mock(collateralTokens[0]);
         wBtc = ERC20Mock(collateralTokens[1]);
+        ethUsdPriceFeed = MockV3Aggregator(engine.getCollateralPriceFeed(address(wEth)));
+        btcUsdPriceFeed = MockV3Aggregator(engine.getCollateralPriceFeed(address(wBtc)));
     }
 
     function mintDsc(uint256 amountDsc, uint256 addressSeed) public {
@@ -76,6 +82,14 @@ contract DSCEngineHandler is Test {
         vm.stopPrank();
         usersWithCollateralDeposited.push(msg.sender);
     }
+
+    // Collateral price update breaks invariant test
+    // function updateCollateralPrice(uint256 collateralSeed, uint256 newPrice) public {
+    //     newPrice = bound(newPrice, 1, 1000000 * 1e8);
+    //     ERC20Mock collateral = _getCollateralAddressFromSeed(collateralSeed);
+    //     MockV3Aggregator priceFeed = MockV3Aggregator(engine.getCollateralPriceFeed(address(collateral)));
+    //     priceFeed.updateAnswer(int256(uint256(newPrice)));
+    // }
 
     function _getCollateralAddressFromSeed(uint256 collateralSeed) internal view returns (ERC20Mock) {
         if ((collateralSeed) % 2 == 0) {

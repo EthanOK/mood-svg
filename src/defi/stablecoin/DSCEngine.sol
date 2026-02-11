@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {OracleLib} from "../../libraries/OracleLib.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {DecentralizedStableCoin} from "./DecentralizedStableCoin.sol";
@@ -11,6 +12,7 @@ import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IER
 
 contract DSCEngine is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using OracleLib for AggregatorV3Interface;
 
     error DSCEngine__NeedsMoreThanZero();
     error DSCEngine__TokenNotAllowed(address token);
@@ -265,8 +267,8 @@ contract DSCEngine is Ownable, ReentrancyGuard {
 
     function _getCollateralPrice(address token) internal view returns (uint256) {
         AggregatorV3Interface priceFeed = AggregatorV3Interface(_collateralInfo[token].priceFeed);
-        (, int256 price,, uint256 updatedAt,) = priceFeed.latestRoundData();
-        require(block.timestamp - updatedAt <= TIME_OUT, "Price feed is stale");
+        (, int256 price,,,) = OracleLib.staleCheckLatestRoundData(priceFeed);
+
         return uint256(price);
     }
 
@@ -302,6 +304,10 @@ contract DSCEngine is Ownable, ReentrancyGuard {
 
     function getCollateralTokens() external view returns (address[] memory) {
         return _collateralTokens;
+    }
+
+    function getCollateralPriceFeed(address token) external view returns (address) {
+        return _collateralInfo[token].priceFeed;
     }
 
     function _checkHealthFactor(address user) internal view {
